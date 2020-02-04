@@ -50,7 +50,7 @@ class MNBC(nn.Module):
             N_negative += torch.sum(batch.label - 1).data.numpy()
             N_positive += torch.sum(batch.label % 2).data.numpy()
             label = batch.label.data
-            
+
             for i, s in enumerate(batch.text):
                 if label[i] == 1:
                     p[s] += 1
@@ -63,7 +63,7 @@ class MNBC(nn.Module):
         filename = "mnbc/pred" + ".txt"
         print ("Outputing predictions")
         utils.test_model(self, test_iter, filename)
-        return 
+        return
 
 """
 Logistic regression model
@@ -119,73 +119,42 @@ class LogReg(nn.Module):
 """
 Continuous Bag of Words model
 
-Pre-trained word embeddings are summed to obtain a representation of the 
+Pre-trained word embeddings are summed to obtain a representation of the
 sentence and a linear layer is applyied to the result
 
 """
 
 class CBOW(nn.Module):
-
-    def __init__(self, vocab_size, pretrained_embed, vect_size):
+    def __init__(self, embeddings, label_size, args):
         super(CBOW, self).__init__()
-        self.vocab_size = vocab_size
-        self.pretrained_embed = pretrained_embed
-        self.vect_size = vect_size
+        self.vocab_size = embeddings.size(0)
+        self.pretrained_embed = embeddings
+        self.hidden_size = args['hidden_size']
+        self.label_size = label_size
 
-        self.embed = nn.Embedding(vocab_size, vect_size)
-        self.embed.weight = nn.Parameter(pretrained_embed)
-        self.w = nn.Linear(vect_size, 1)
+        self.embed = nn.Embedding(self.vocab_size, self.hidden_size)
+        self.embed.weight = nn.Parameter(embeddings)
+        self.w = nn.Linear(self.hidden_size, label_size)
 
-        self.loss = nn.BCEWithLogitsLoss()
-        self.optimizer = torch.optim.SGD(self.parameters(), lr=0.1)
+        self.dropout = nn.Dropout(args['dropout'])
 
     def forward(self, batch):
         emb_prod = self.embed(batch)
         cont_bow = torch.sum(emb_prod, 1)
         linear_separator = self.w(cont_bow)
-        return linear_separator.squeeze()
-
-    def predict(self, batch):
-        scores = self.forward(batch.text)
-        preds = (scores >= 0).type(torch.LongTensor)
-        return preds + 1
-
-    def train(self, train_iter, val_iter, num_epochs=50):
-        for epoch in range(num_epochs):
-            total_loss = 0
-            train_len = 0
-            # initialize the counters
-            for batch in tqdm(chain(train_iter, val_iter)):
-                batch.text.volatile = False
-                batch.label.volatile = False
-
-                self.optimizer.zero_grad()
-                scores = self.forward(batch.text)
-                ys = (batch.label - 1).type(torch.FloatTensor)
-                output = self.loss(scores, ys)
-                output.backward()
-                self.optimizer.step()
-
-                total_loss += output.data[0]
-                train_len += 1
-                total_loss /= train_len
-
-            if not epoch % 5:
-                val_loss, val_accuracy = utils.calc_accuracy_1dim(self, val_iter)
-                print('Epoch {}/{}: training loss is {}; val loss is {}'.format(epoch, num_epochs, total_loss, val_loss))
-                print('val accuracy is {}'.format(val_accuracy))
+        y = self.dropout(linear_separator)
+        return y
 
 """
-2 channels Convolutional Neural Netowrk 
+2 channels Convolutional Neural Netowrk
 as described by Kim in the paper https://arxiv.org/pdf/1408.5882.pdf
-pretrained word embeddings, 3 stride sizes for convolution layers, 
+pretrained word embeddings, 3 stride sizes for convolution layers,
 ReLu activation and max polling, drop out regularization, normalization
-of the linear fully connected layer  
+of the linear fully connected layer
 """
 
 class CNN(nn.Module):
-
-    def __init__(self, embeddings, label_size, dropout):
+    def __init__(self, embeddings, label_size, args):
         super(CNN, self).__init__()
         self.vocab_size = embeddings.size(0)
         self.embed_dim = embeddings.size(1)
@@ -207,7 +176,7 @@ class CNN(nn.Module):
 
         self.fc1 = nn.Linear(600, self.label_size)
 
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(args['dropout'])
 
     def forward(self, batch):
         x_dynamic = self.w(batch).transpose(1,2)
@@ -230,7 +199,7 @@ class CNN(nn.Module):
         z = torch.cat((z1, z2, z3, z4, z5, z6), dim=1)
 
         d = self.dropout(z)
-        y = self.fc1(d).squeeze()
+        y = self.fc1(d)
         return y
 
 """
@@ -239,7 +208,7 @@ Like the previous by 2 layer CNN
 
 class CNN2(nn.Module):
 
-    def __init__(self, embeddings):
+    def __init__(self, embeddings, label_size, args):
         super(CNN2, self).__init__()
         self.vocab_size = embeddings.size(0)
         self.embed_dim = embeddings.size(1)
@@ -250,16 +219,15 @@ class CNN2(nn.Module):
         self.w_static = nn.Embedding(self.vocab_size, self.embed_dim)
         self.w_static.weight = nn.Parameter(embeddings, requires_grad=False)
 
-        nc1 = 32
-        nc2 = 64
+        nc1 = nc2 = args['hidden_size']
 
 
-        self.conv1 = nn.Conv1d(300, nc1, 3, padding=1, stride=1)
-        self.conv2 = nn.Conv1d(300, nc1, 4, padding=2, stride=1)
-        self.conv3 = nn.Conv1d(300, nc1, 5, padding=2, stride=1)
-        self.conv4 = nn.Conv1d(300, nc1, 3, padding=1, stride=1)
-        self.conv5 = nn.Conv1d(300, nc1, 4, padding=2, stride=1)
-        self.conv6 = nn.Conv1d(300, nc1, 5, padding=2, stride=1)
+        self.conv1 = nn.Conv1d(self.embed_dim, nc1, 3, padding=1, stride=1)
+        self.conv2 = nn.Conv1d(self.embed_dim, nc1, 4, padding=2, stride=1)
+        self.conv3 = nn.Conv1d(self.embed_dim, nc1, 5, padding=2, stride=1)
+        self.conv4 = nn.Conv1d(self.embed_dim, nc1, 3, padding=1, stride=1)
+        self.conv5 = nn.Conv1d(self.embed_dim, nc1, 4, padding=2, stride=1)
+        self.conv6 = nn.Conv1d(self.embed_dim, nc1, 5, padding=2, stride=1)
 
         self.conv21 = nn.Conv1d(nc1, nc2, 3, padding=1, stride=1)
         self.conv22 = nn.Conv1d(nc1, nc2, 3, padding=1, stride=1)
@@ -268,13 +236,11 @@ class CNN2(nn.Module):
         self.conv25 = nn.Conv1d(nc1, nc2, 3, padding=1, stride=1)
         self.conv26 = nn.Conv1d(nc1, nc2, 3, padding=1, stride=1)
 
-        self.fc1 = nn.Linear(64 * 6, 1)
-        self.loss = nn.BCEWithLogitsLoss()
+        self.fc1 = nn.Linear(nc2 * 6, label_size)
 
-        self.optimizer = torch.optim.Adamax(filter(lambda p: p.requires_grad, self.parameters()))
+        self.dropout = nn.Dropout(args['dropout'])
 
-
-    def forward(self, batch, training=False):
+    def forward(self, batch):
         x_dynamic = self.w(batch).transpose(1,2)
         x_static = self.w_static(batch).transpose(1,2)
 
@@ -308,43 +274,9 @@ class CNN2(nn.Module):
 
         z = torch.cat((z21, z22, z23, z24, z25, z26), dim=1)
 
-        d = F.dropout(z, 0.5, training)
-        y = self.fc1(d).squeeze()
+        d = self.dropout(z)
+        y = self.fc1(d)
         return y
-
-    def predict(self, batch):
-        scores = self.forward(batch.text)
-        preds = (scores >= 0).type(torch.LongTensor)
-        return preds + 1
-
-    def train(self, train_iter, val_iter, test_iter, num_epochs):
-        for epoch in tqdm(range(num_epochs)):
-
-            if not epoch % 1:
-                val_accuracy = utils.calc_accuracy(self, val_iter)
-                train_accuracy = utils.calc_accuracy(self, train_iter)
-                print ("Epoch: " + str(epoch))
-                print ("Train Accuracy: " + str(train_accuracy))
-                print ("Validation Accuracy: " + str(val_accuracy))
-
-            if not epoch % 1:
-                filename = "magic/pred" + str(epoch) + ".txt"
-                print ("Outputing predictions")
-                utils.test_model(self, test_iter, filename)
-
-            for batch in tqdm(chain(train_iter, val_iter)):
-                batch.text.volatile = False
-                batch.label.volatile = False
-                self.optimizer.zero_grad()
-                probs = self.forward(batch.text, training=True)
-                ys = (batch.label - 1).type(torch.FloatTensor)
-                output = self.loss(probs, ys)                
-                output.backward()
-                self.optimizer.step()
-
-                # Regularize by capping fc layer weights at norm 3
-                if torch.norm(self.fc1.weight.data) > 3.0:
-                    self.fc1.weight = nn.Parameter(3.0 * self.fc1.weight.data / torch.norm(self.fc1.weight.data))
 
 """
 LSTM model
@@ -352,78 +284,44 @@ LSTM model
 Bidirectional LSTM on top of pretrained word embeddings.
 100 dimensional hidden representation output per direction, so 200 dimension
 final hidden representation. Relu and Max pooling, and linear layer with
-regularization. 
+regularization.
 
 Takes number of layers as input parameter (we tested 1 and 2 layers)
 """
 
 class LSTM(nn.Module):
-
-    def __init__(self, embeddings, layers=1):
+    def __init__(self, embeddings, label_size, args):
         super(LSTM, self).__init__()
         self.vocab_size = embeddings.size(0)
         self.embed_dim = embeddings.size(1)
+        self.layers = args['num_layers']
+        self.hidden_size = args['hidden_size']
 
         self.w = nn.Embedding(self.vocab_size, self.embed_dim)
         self.w.weight = nn.Parameter(embeddings)
 
         # biderectional LSTM layer
-        self.lstm = nn.LSTM(300, 100, layers, batch_first=True, dropout=0.5, bidirectional=True)
-        self.c0 = Variable(torch.FloatTensor(layers * 2, 1, 100).zero_(), requires_grad=True)
-        self.h0 = Variable(torch.FloatTensor(layers * 2, 1, 100).zero_(), requires_grad=True)
+        self.lstm = nn.LSTM(self.embed_dim, self.hidden_size, self.layers, batch_first=True, dropout=args['dropout'], bidirectional=True)
+        self.c0 = torch.zeros((self.layers * 2, 1, self.hidden_size), requires_grad=True)
+        self.h0 = torch.zeros((self.layers * 2, 1, self.hidden_size), requires_grad=True)
 
-        self.fc1 = nn.Linear(200, 1)
-        self.loss = nn.BCEWithLogitsLoss()
+        self.fc1 = nn.Linear(2 * self.hidden_size, label_size)
 
-        self.optimizer = torch.optim.Adamax(filter(lambda p: p.requires_grad, self.parameters()))
+        self.dropout = nn.Dropout(args['dropout'])
 
-
-    def forward(self, batch, training=False):
+    def forward(self, batch):
         h = torch.cat([self.h0 for _ in range(batch.size(0))], 1)
         c = torch.cat([self.c0 for _ in range(batch.size(0))], 1)
 
-        H, hn = self.lstm(self.w(batch), (h, c))
+        H, _ = self.lstm(self.w(batch), (h, c))
         a = F.relu(H)
         a = a.transpose(1,2)
-        z = F.max_pool1d(a, a.size(2)).view(-1, 200)
+        z = F.max_pool1d(a, a.size(2)).view(-1, 2*self.hidden_size)
 
-        d = F.dropout(z, 0.5, training)
-        
-        y = self.fc1(d).squeeze()
+        d = self.dropout(z)
+
+        y = self.fc1(d)
         return y
-
-    def predict(self, batch):
-        scores = self.forward(batch.text)
-        preds = (scores >= 0).type(torch.LongTensor)
-        return preds + 1
-
-    def train(self, train_iter, val_iter, test_iter, num_epochs):
-        for epoch in tqdm(range(num_epochs)):
-
-            # if not epoch % 1:
-            #     train_accuracy = utils.calc_accuracy(self, train_iter)
-            #     print ("Epoch: " + str(epoch))
-            #     print ("Train Accuracy: " + str(train_accuracy))
-            #     print ("Validation Accuracy: " + str(val_accuracy))
-
-            if not epoch % 1:
-                filename = "lstm/pred" + str(epoch) + ".txt"
-                print ("Outputing predictions")
-                utils.test_model(self, test_iter, filename)
-
-            for batch in (chain(train_iter, val_iter)):
-                batch.text.volatile = False
-                batch.label.volatile = False
-                self.optimizer.zero_grad()
-                probs = self.forward(batch.text, training=True)
-                ys = (batch.label - 1).type(torch.FloatTensor)
-                output = self.loss(probs, ys)                
-                output.backward()
-                self.optimizer.step()
-
-                # Regularize by capping fc layer weights at norm 3
-                if torch.norm(self.fc1.weight.data) > 3.0:
-                    self.fc1.weight = nn.Parameter(3.0 * self.fc1.weight.data / torch.norm(self.fc1.weight.data))
 
 """
 LSTM - CNN model
@@ -475,7 +373,7 @@ class LSTMCNN(nn.Module):
         z1 = F.max_pool1d(conv1, conv1.size(2)).view(batch.size(0), -1)
         z2 = F.max_pool1d(conv2, conv2.size(2)).view(batch.size(0), -1)
         z3 = F.max_pool1d(conv3, conv3.size(2)).view(batch.size(0), -1)
-        
+
         z = torch.cat((z1, z2, z3), dim=1)
 
         d = F.dropout(z, 0.5, training)
@@ -483,39 +381,11 @@ class LSTMCNN(nn.Module):
 
         return y
 
-    def predict(self, batch):
-        scores = self.forward(batch.text)
-        preds = (scores >= 0).type(torch.LongTensor)
-        return preds + 1
-
-    def train(self, train_iter, val_iter, test_iter, num_epochs):
-        for epoch in tqdm(range(num_epochs)):
-
-            # if not epoch % 1:
-            #     # val_accuracy = utils.calc_accuracy(self, val_iter)
-            #     train_accuracy = utils.calc_accuracy(self, train_iter)
-            #     print ("Epoch: " + str(epoch))
-            #     print ("Train Accuracy: " + str(train_accuracy))
-            #     # print ("Validation Accuracy: " + str(val_accuracy))
-
-            if not epoch % 1:
-                filename = "lstmcnn/pred" + str(epoch) + ".txt"
-                print ("Outputing predictions")
-                utils.test_model(self, test_iter, filename)
-
-            for batch in tqdm(chain(train_iter, val_iter)):
-                batch.text.volatile = False
-                batch.label.volatile = False
-                self.optimizer.zero_grad()
-                probs = self.forward(batch.text, training=True)
-                ys = (batch.label - 1).type(torch.FloatTensor)
-                output = self.loss(probs, ys)                
-                output.backward()
-                self.optimizer.step()
-
-                # Regularize by capping fc layer weights at norm 3
-                if torch.norm(self.fc1.weight.data) > 3.0:
-                    self.fc1.weight = nn.Parameter(3.0 * self.fc1.weight.data / torch.norm(self.fc1.weight.data))
-
-
-                    
+model_dict = {
+    'mnbc': MNBC,
+    'cbow': CBOW,
+    'cnn': CNN,
+    'cnn2': CNN2,
+    'lstm': LSTM,
+    'lstm_cnn': LSTMCNN
+}

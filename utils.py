@@ -4,6 +4,9 @@ from torchtext import data
 from torchtext.vocab import Vectors, GloVe
 import os
 from tqdm import tqdm
+from datetime import datetime
+
+import model
 
 def to_tsv(path):
     """
@@ -56,11 +59,32 @@ def predict(module, batch):
     module.train(mode)
     return scores.argmax(1)
 
-def train(module, train_iter, val_iter, train_epoch, eval_epochs):
-    optimizer = torch.optim.Adamax(filter(lambda p: p.requires_grad, module.parameters()))
+def train(train_iter, val_iter, TEXT, LABEL, args):
+
+    # Initialize model and optimizer. This requires loading checkpoint if specified in the arguments.
+    if args['load_checkpoint_path'] == None:
+        module = model.model_dict[args['model_name']](TEXT.vocab.vectors, len(LABEL.vocab), args)
+        optimizer = torch.optim.Adamax(filter(lambda p: p.requires_grad, module.parameters()))
+        epoch_start = 0
+    else:
+        checkpoint = torch.load(args['load_checkpoint_path'])
+
+        # Overwrite arguments if required.
+        if args['overwrite_args']:
+            args = checkpoint['args']
+        module = model.model_dict[checkpoint['args']['model_name']]()
+        optimizer = torch.optim.Adamax(filter(lambda p: p.requires_grad, module.parameters()))
+
+        module.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        epoch_start = checkpoint['epoch']
+
+    module.to(torch.device(args['device']))
     loss_function = torch.nn.CrossEntropyLoss()
 
-    for epoch in tqdm(range(train_epoch)):
+    loss_tot = 0
+
+    for epoch in tqdm(range(epoch_start, args['train_epochs'])):
         for batch in tqdm(train_iter):
             optimizer.zero_grad()
             scores = module.forward(batch.text)
@@ -73,15 +97,42 @@ def train(module, train_iter, val_iter, train_epoch, eval_epochs):
             # if torch.norm(model.fc1.weight.data) > 3.0:
             #     model.fc1.weight = nn.Parameter(3.0 * model.fc1.weight.data / torch.norm(model.fc1.weight.data))
 
-        if (epoch + 1) % eval_epochs == 0:
+            loss_tot += loss.item()
+
+        loss_avg = loss_tot/len(train_iter)
+        print ("Loss: " + str(loss_avg))
+
+        if (epoch + 1) % args['eval_epochs'] == 0:
             val_accuracy = calc_accuracy(module, val_iter)
             train_accuracy = calc_accuracy(module, train_iter)
             print ("Epoch: " + str(epoch))
             print ("Train Accuracy: " + str(train_accuracy))
             print ("Validation Accuracy: " + str(val_accuracy))
 
-        # TODO: checkpoint.
+            # Checkpoint
+            checkpoint_path = os.path.join('log', args['checkpoint_path'])
+            if not os.path.exists(checkpoint_path):
+                os.makedirs(checkpoint_path)
+            with open(os.path.join(checkpoint_path, 'log.txt'), 'a+') as log_file:
+                log_file.write("Epoch: " + str(epoch) + "\n")
+                log_file.write("Train Accuracy: " + str(train_accuracy) + "\n")
+                log_file.write("Validation Accuracy: " + str(val_accuracy) + "\n")
+                log_file.write("Loss: " + str(loss_avg) + "\n")
 
+                # datetime object containing current date and time
+                now = datetime.now()
+                dt_string = now.strftime("%d-%m-%Y_%H:%M:%S")
+                log_file.write("Saving Checkpoint: " + str(dt_string) + "\n")
+
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': module.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'train_loss': loss_avg,
+                    'val_accuracy': val_accuracy,
+                    'train_accuracy': train_accuracy,
+                    'args': args
+                    }, os.path.join(checkpoint_path, dt_string + '.pt'))
 
 def calc_accuracy(module, test_iter):
     correct = 0

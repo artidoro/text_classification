@@ -1,3 +1,6 @@
+log/
+scripts/
+
 .vscode/
 .vector_cache/
 

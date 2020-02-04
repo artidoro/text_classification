@@ -26,41 +26,23 @@ if __name__ == '__main__':
     parser.add_argument('--train_path', default='../topicclass/topicclass_train.txt')
     parser.add_argument('--valid_path', default='../topicclass/topicclass_valid.txt')
     parser.add_argument('--test_path', default='../topicclass/topicclass_test.txt')
-    parser.add_argument('--alpha', default=1)
-    parser.add_argument('--batch_size', default=10)
-    parser.add_argument('--embed_size', default=300)
-    parser.add_argument('--train_epochs', default=5)
-    parser.add_argument('--eval_epochs', default=1)
-    parser.add_argument('--dropout', default=0.5)
+    parser.add_argument('--alpha', default=1, type=float)
+    parser.add_argument('--batch_size', default=10, type=int)
+    parser.add_argument('--embed_size', default=300, type=int)
+    parser.add_argument('--hidden_size', default=100, type=int)
+    parser.add_argument('--train_epochs', default=20, type=int)
+    parser.add_argument('--eval_epochs', default=1, type=int)
+    parser.add_argument('--dropout', default=0.5, type=float)
     parser.add_argument('--device', default='cpu', help='select cuda for the gpu')
+    parser.add_argument('--model_name', default='cnn')
+    parser.add_argument('--num_layers', default=1, type=int)
+    parser.add_argument('--checkpoint_path')
+    parser.add_argument('--load_checkpoint_path', default=None)
+    parser.add_argument('--overwrite_args', action='store_true')
     args = vars(parser.parse_args())
-
 
     train_iter, val_iter, test_iter, TEXT, LABEL = utils.torchtext_iterators(
         args['train_path'], args['valid_path'], args['test_path'],
         batch_size=args['batch_size'], device=torch.device(args['device']))
 
-    vocab_size = len(TEXT.vocab)
-    label_size = len(LABEL.vocab)
-
-    # MNBC = model.MNBC(vocab_size, args['alpha'])
-    # MNBC.train(train_iter, val_iter, test_iter)
-
-    #LogReg = model.LogReg(vocab_size)
-    #LogReg.train(train_iter, val_iter, train_epoch=2)
-
-    #CBOW = model.CBOW(vocab_size, TEXT.vocab.vectors, vect_size)
-    #CBOW.train(train_iter, val_iter, train_epoch=1)
-
-    CNN = model.CNN(TEXT.vocab.vectors, label_size, args['dropout'])
-    CNN.to(torch.device(args['device']))
-    utils.train(CNN, train_iter, val_iter, train_epoch=args['train_epochs'], eval_epochs=args['eval_epochs'])
-
-    #CNN2 = model.CNN2(embeddings=TEXT.vocab.vectors)
-    #CNN2.train(train_iter, val_iter, test_iter, train_epoch=200)
-
-    # LSTM = model.LSTM(embeddings=TEXT.vocab.vectors, layers=1)
-    # LSTM.train(train_iter, val_iter, test_iter, train_epoch=5)
-
-    # LSTMCNN = model.LSTMCNN(embeddings=TEXT.vocab.vectors)
-    # LSTMCNN.train(train_iter, val_iter, test_iter, train_epoch=5)
+    utils.train(train_iter, val_iter, TEXT, LABEL, args)
