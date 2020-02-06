@@ -5,6 +5,9 @@ from torchtext.vocab import Vectors, GloVe
 import os
 from tqdm import tqdm
 from datetime import datetime
+import logging
+import pprint
+import io
 
 import model
 
@@ -21,11 +24,33 @@ def to_tsv(path):
             tsv_file.write(data_file.read().replace('|||', '\t'))
     return new_path
 
-def torchtext_iterators(train_path, valid_path, test_path,
-    batch_size=10, device=torch.device('cpu')):
+
+def load_vectors(fname, train_vocab, device):
     """
-    Builds torchtext iterators from the files.
+    Modified from https://fasttext.cc/docs/en/english-vectors.html.
+    This loads fasttext vectors for words that have been encountered in the
+    vocabulary `train_vocab`.
+    We also build a string to inter map to get inter index for the words.
     """
+    fin = io.open(fname, 'r', encoding='utf-8', newline='\n', errors='ignore')
+    n, d = map(int, fin.readline().split())
+    data = {}
+    stoi = {}
+    for idx, line in enumerate(fin):
+        tokens = line.rstrip().split(' ')
+        if tokens[0] in train_vocab.freqs:
+            stoi[tokens[0]] = idx
+            data[idx] = torch.tensor(list(map(float, tokens[1:])), device=device)
+    return data, stoi
+
+def torchtext_iterators(args, load_vectors_manually=True,
+    fast_text_path='/home/artidoro/data/crawl-300d-2M.vec'):
+    """
+    Builds torchtext iterators from the files. Loads vectors manually
+    or automatically. For the assignment manually should be set.
+    """
+    logger = logging.getLogger('logger')
+    logger.info('Starting to load data and create iterators.')
 
     # `sequential` does not tokenize the label.
     label = data.Field(batch_first=True, sequential=False)
@@ -33,106 +58,51 @@ def torchtext_iterators(train_path, valid_path, test_path,
     text = data.Field(batch_first=True, lower=True)
 
     fields = [('label', label), ('text', text)]
-    train = data.TabularDataset(to_tsv(train_path), 'tsv', fields)
-    valid = data.TabularDataset(to_tsv(valid_path), 'tsv', fields)
-    test = data.TabularDataset(to_tsv(test_path), 'tsv', fields)
+    train = data.TabularDataset(to_tsv(args['train_path']), 'tsv', fields)
+    valid = data.TabularDataset(to_tsv(args['valid_path']), 'tsv', fields)
+    test = data.TabularDataset(to_tsv(args['test_path']), 'tsv', fields)
 
     text.build_vocab(train)
     label.build_vocab(train)
 
     train_iter, valid_iter, test_iter = torchtext.data.BucketIterator.splits(
-            (train, valid, test), batch_size=batch_size, repeat=False, device=device,
-            sort_key=lambda x: len(x.text), sort_within_batch=False)
+            (train, valid, test), batch_size=args['batch_size'], repeat=False,
+            device=torch.device(args['device']), sort_key=lambda x: len(x.text),
+            sort_within_batch=False)
 
-    # TODO: Use FastText embeddings.
-    #url = 'https://s3-us-west-1.amazonaws.com/fasttext-vectors/wiki.simple.vec'
-    #TEXT.vocab.load_vectors(vectors=Vectors('wiki.simple.vec', url=url))
-
-    text.vocab.load_vectors(vectors=GloVe(name='6B'))
+    if not args['no_pretrained_vectors']:
+        if not load_vectors_manually:
+            logger.info('Starting to load vectors from Glove.')
+            text.vocab.load_vectors(vectors=GloVe(name='6B'))
+        else:
+            logger.info('Starting to manually load vectors from FastText.')
+            vector_map, stoi = load_vectors(fast_text_path, text.vocab, torch.device(args['device']))
+            text.vocab.set_vectors(stoi, vector_map, 300)
 
     return train_iter, valid_iter, test_iter, text, label
 
-def predict(module, batch):
+def eval(module, test_iter):
     mode = module.training
     module.eval()
-    scores = module.forward(batch.text)
-    module.train(mode)
-    return scores.argmax(1)
 
-def train(train_iter, val_iter, TEXT, LABEL, args):
-
-    # Initialize model and optimizer. This requires loading checkpoint if specified in the arguments.
-    if args['load_checkpoint_path'] == None:
-        module = model.model_dict[args['model_name']](TEXT.vocab.vectors, len(LABEL.vocab), args)
-        optimizer = torch.optim.Adamax(filter(lambda p: p.requires_grad, module.parameters()))
-        epoch_start = 0
-    else:
-        checkpoint = torch.load(args['load_checkpoint_path'])
-
-        # Overwrite arguments if required.
-        if args['overwrite_args']:
-            args = checkpoint['args']
-        module = model.model_dict[checkpoint['args']['model_name']]()
-        optimizer = torch.optim.Adamax(filter(lambda p: p.requires_grad, module.parameters()))
-
-        module.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        epoch_start = checkpoint['epoch']
-
-    module.to(torch.device(args['device']))
-    loss_function = torch.nn.CrossEntropyLoss()
-
+    correct = 0
+    total = 0
     loss_tot = 0
+    eval_results = {}
 
-    for epoch in tqdm(range(epoch_start, args['train_epochs'])):
-        for batch in tqdm(train_iter):
-            optimizer.zero_grad()
-            scores = module.forward(batch.text)
-            loss = loss_function(scores, batch.label)
-            loss.backward()
-            optimizer.step()
+    for batch in tqdm(test_iter):
+        scores = module.forward(batch.text)
+        loss = model.loss(scores, batch.label)
+        loss_tot += loss.item()
+        preds = scores.argmax(1).squeeze()
+        correct += sum((preds == batch.label)).item()
+        total += batch.text.shape[0]
+    eval_results['loss'] = loss_tot/len(test_iter)
+    eval_results['accuracy'] = correct / total
 
-            # TODO: add regularization back.
-            # # Regularize by capping fc layer weights at norm 3
-            # if torch.norm(model.fc1.weight.data) > 3.0:
-            #     model.fc1.weight = nn.Parameter(3.0 * model.fc1.weight.data / torch.norm(model.fc1.weight.data))
+    module.train(mode)
+    return eval_results
 
-            loss_tot += loss.item()
-
-        loss_avg = loss_tot/len(train_iter)
-        print ("Loss: " + str(loss_avg))
-
-        if (epoch + 1) % args['eval_epochs'] == 0:
-            val_accuracy = calc_accuracy(module, val_iter)
-            train_accuracy = calc_accuracy(module, train_iter)
-            print ("Epoch: " + str(epoch))
-            print ("Train Accuracy: " + str(train_accuracy))
-            print ("Validation Accuracy: " + str(val_accuracy))
-
-            # Checkpoint
-            checkpoint_path = os.path.join('log', args['checkpoint_path'])
-            if not os.path.exists(checkpoint_path):
-                os.makedirs(checkpoint_path)
-            with open(os.path.join(checkpoint_path, 'log.txt'), 'a+') as log_file:
-                log_file.write("Epoch: " + str(epoch) + "\n")
-                log_file.write("Train Accuracy: " + str(train_accuracy) + "\n")
-                log_file.write("Validation Accuracy: " + str(val_accuracy) + "\n")
-                log_file.write("Loss: " + str(loss_avg) + "\n")
-
-                # datetime object containing current date and time
-                now = datetime.now()
-                dt_string = now.strftime("%d-%m-%Y_%H:%M:%S")
-                log_file.write("Saving Checkpoint: " + str(dt_string) + "\n")
-
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': module.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'train_loss': loss_avg,
-                    'val_accuracy': val_accuracy,
-                    'train_accuracy': train_accuracy,
-                    'args': args
-                    }, os.path.join(checkpoint_path, dt_string + '.pt'))
 
 def calc_accuracy(module, test_iter):
     correct = 0
@@ -144,11 +114,67 @@ def calc_accuracy(module, test_iter):
         total += batch.text.shape[0]
     return correct / total
 
+
+def predict(module, batch):
+    mode = module.training
+    module.eval()
+    scores = module.forward(batch.text)
+    module.train(mode)
+    return scores.argmax(1)
+
+def train(module, optimizer, train_iter, val_iter, args):
+    loss_tot = 0
+    logger = logging.getLogger('logger')
+
+    for epoch in range(args['train_epochs']):
+        logger.info('Starting training for epoch {} of {}.'.format(epoch+1, args['train_epochs']))
+        for batch in tqdm(train_iter):
+            optimizer.zero_grad()
+            scores = module.forward(batch.text)
+            loss = model.loss(scores, batch.label)
+            loss.backward()
+            optimizer.step()
+
+            # TODO: add regularization back.
+            # # Regularize by capping fc layer weights at norm 3
+            # if torch.norm(model.fc1.weight.data) > 3.0:
+            #     model.fc1.weight = nn.Parameter(3.0 * model.fc1.weight.data / torch.norm(model.fc1.weight.data))
+
+            loss_tot += loss.item()
+
+        loss_avg = loss_tot/len(train_iter)
+        logger.info('Loss: {:.4f}'.format(loss_avg))
+
+        if (epoch + 1) % args['eval_epochs'] == 0:
+            logger.info('Starting evaluation.')
+            evaluation_results = {}
+            evaluation_results['train'] = eval(module, train_iter)
+            evaluation_results['valid'] = eval(module, val_iter)
+            logger.info('\n' + pprint.pformat(evaluation_results))
+
+            # Checkpoint
+            checkpoint_path = os.path.join('log', args['checkpoint_path'])
+            if not os.path.exists(checkpoint_path):
+                os.makedirs(checkpoint_path)
+                # datetime object containing current date and time
+                now = datetime.now()
+                dt_string = now.strftime("%d-%m-%Y_%H:%M:%S")
+                logger.info('Saving Checkpoint: {}'.format(dt_string))
+
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': module.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'train_loss': loss_avg,
+                    'evaluation_results': evaluation_results,
+                    'args': args
+                    }, os.path.join(checkpoint_path, dt_string + '.pt'))
+
+
 # def test_model(model, test_iter, filename):
 #     "All models should be able to be run with following command."
 #     upload = []
 #     # Update: for kaggle the bucket iterator needs to have batch_size 10
-    
 #     correct = 0
 #     total = 0
 
