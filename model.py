@@ -4,113 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 import utils
+from collections import Counter
 from itertools import chain
-
-# """
-# Module for Multinomial Naive Bayes Classifier MNBC.
-# This implements the model described by Wang and Manning at:
-# https://www.aclweb.org/anthology/P12-2018.pdf
-# """
-
-# class MNBC(nn.Module):
-
-#     def __init__(self, vocab_size, alpha):
-#         super(MNBC, self).__init__()
-#         self.vocab_size = vocab_size
-#         self.alpha = alpha
-
-#         self.embed = nn.Embedding(vocab_size, 1)
-#         self.b = Variable(torch.FloatTensor(1).zero_())
-
-#     def forward(self, batch):
-#         dim1, dim2 = batch.size()
-#         emb_prod = self.embed(batch.view(1,-1).squeeze()).view(dim1, dim2)
-#         dot_prod = torch.sum(emb_prod, 1)
-#         linear_separator = dot_prod + self.b
-#         pos = torch.sigmoid(linear_separator)
-#         neg = torch.sigmoid(-linear_separator)
-#         return torch.cat((pos.view(-1,1), neg.view(-1,1)), 1)
-
-#     def predict(self, batch):
-#         probs = self.forward(batch.text)
-#         _, argmax = (probs.max(1))
-#         return argmax + 1
-
-#     # training method for module takes the training iterator (in place)
-#     def train(self, train_iter, val_iter, test_iter):
-#         # initialize the counters
-#         p = Variable(torch.FloatTensor(self.vocab_size).zero_()) + self.alpha
-#         q = Variable(torch.FloatTensor(self.vocab_size).zero_()) + self.alpha
-
-#         # keep track of positive and negative examples
-#         N_positive = 0
-#         N_negative = 0
-#         for batch in tqdm(train_iter):
-#             # update variables p,q, N, N
-#             N_negative += torch.sum(batch.label - 1).data.numpy()
-#             N_positive += torch.sum(batch.label % 2).data.numpy()
-#             label = batch.label.data
-
-#             for i, s in enumerate(batch.text):
-#                 if label[i] == 1:
-#                     p[s] += 1
-#                 else:
-#                     q[s] += 1
-
-#         self.embed.weight = torch.nn.Parameter(torch.log((p / torch.sum(p)) / (q / torch.sum(q))).data)
-#         self.b = torch.log(Variable(torch.FloatTensor(N_positive / N_negative)))
-
-#         filename = "mnbc/pred" + ".txt"
-#         print ("Outputing predictions")
-#         utils.test_model(self, test_iter, filename)
-#         return
-
-# """
-# Logistic regression model
-# """
-
-# class LogReg(nn.Module):
-#     def __init__(self, TEXT, LABEL):
-#         super(LogReg, self).__init__()
-#         self.vocab_size = len(TEXT.vocab)
-#         self.embed = nn.Embedding(self.vocab_size, 1)
-#         self.b = Variable(torch.FloatTensor(1).zero_(), requires_grad=True)
-
-#     def forward(self, batch):
-#         emb_prod = self.embed(batch)
-#         dot_prod = torch.sum(emb_prod, 1)
-#         linear_separator = dot_prod + self.b
-#         return linear_separator.squeeze()
-
-#     def predict(self, batch):
-#         scores = self.forward(batch.text)
-#         preds = (scores >= 0).type(torch.LongTensor)
-#         return preds + 1
-
-#     # training method for module takes the training iterator (in place)
-#     def train(self, train_iter, val_iter, num_epochs=2000):
-#         for epoch in range(num_epochs):
-#             total_loss = 0
-#             train_len = 0
-
-#             for batch in tqdm(chain(train_iter, val_iter)):
-#                 batch.text.volatile = False
-#                 batch.label.volatile = False
-
-#                 self.optimizer.zero_grad()
-#                 probs = self.forward(batch.text)
-#                 ys = (batch.label - 1).type(torch.FloatTensor)
-#                 output = self.loss(probs, ys)
-#                 output.backward()
-#                 self.optimizer.step()
-#                 total_loss += output.data[0]
-#                 train_len += 1
-#             total_loss /= train_len
-
-#             if not epoch % 20:
-#                 val_loss, val_accuracy = utils.calc_accuracy_1dim(self, val_iter)
-#                 print('Epoch {}/{}: training loss is {}; val loss is {}'.format(epoch, num_epochs, total_loss, val_loss))
-#                 print('val accuracy is {}'.format(val_accuracy))
 
 """
 Continuous Bag of Words model
@@ -130,14 +25,14 @@ class CBOW(nn.Module):
         self.embed = nn.Embedding(self.vocab_size, self.embed_dim)
         if not args['no_pretrained_vectors']:
             self.embed.weight = nn.Parameter(TEXT.vocab.vectors)
-        self.embed = nn.Linear(self.embed_dim, self.label_size)
+        self.fc1 = nn.Linear(self.embed_dim, self.label_size)
 
         self.dropout = nn.Dropout(args['dropout'])
 
     def forward(self, batch):
         emb_prod = self.embed(batch)
         cont_bow = torch.sum(emb_prod, 1)
-        linear_separator = self.embed(cont_bow)
+        linear_separator = self.fc1(cont_bow)
         y = self.dropout(linear_separator)
         return y
 
@@ -327,13 +222,6 @@ class LSTM(nn.Module):
 
 """
 LSTM Self Attention model
-
-Bidirectional LSTM on top of pretrained word embeddings.
-100 dimensional hidden representation output per direction, so 200 dimension
-final hidden representation. Self attention, Relu and Max pooling, and linear layer with
-regularization.
-
-Takes number of layers as input parameter (we tested 1 and 2 layers)
 """
 class LSTMSelfAttention(nn.Module):
     def __init__(self, TEXT, LABEL, args):
@@ -384,7 +272,7 @@ We apply a CNN as described earlier to the LSTM output
 
 class LSTMCNN(nn.Module):
 
-    def __init__(self, TEXT, LABEL):
+    def __init__(self, TEXT, LABEL, args):
         super(LSTMCNN, self).__init__()
         self.vocab_size = len(TEXT.vocab)
         self.label_size = len(LABEL.vocab)
@@ -396,22 +284,22 @@ class LSTMCNN(nn.Module):
 
         # biderectional LSTM layer
         self.lstm = nn.LSTM(300, 64, 1, batch_first=True, dropout=0.5, bidirectional=True)
-        self.c0 = Variable(torch.FloatTensor(2, 1, 64).zero_(), requires_grad=True)
-        self.h0 = Variable(torch.FloatTensor(2, 1, 64).zero_(), requires_grad=True)
+        self.c0 = nn.Parameter(torch.zeros((2, 1, 64)))
+        self.h0 = nn.Parameter(torch.zeros((2, 1, 64)))
 
         # cnn
         self.conv1 = nn.Conv1d(128, 64, 3, padding=1, stride=1)
         self.conv2 = nn.Conv1d(128, 64, 4, padding=2, stride=1)
         self.conv3 = nn.Conv1d(128, 64, 5, padding=2, stride=1)
 
-        self.fc1 = nn.Linear(192, 1)
+        self.fc1 = nn.Linear(192, self.label_size)
 
     def forward(self, batch, training=False):
         h = self.h0.expand((-1, batch.size(0), -1)).contiguous()
         c = self.h0.expand((-1, batch.size(0), -1)).contiguous()
 
 
-        H, hn = self.lstm(self.embed(batch), (h, c))
+        H, _ = self.lstm(self.embed(batch), (h, c))
         a = F.relu(H)
 
         a = a.transpose(1,2)
@@ -432,20 +320,9 @@ class LSTMCNN(nn.Module):
         return y
 
 
-"""
-LSTM model
-
-Bidirectional LSTM on top of pretrained word embeddings.
-100 dimensional hidden representation output per direction, so 200 dimension
-final hidden representation. Relu and Max pooling, and linear layer with
-regularization.
-
-Takes number of layers as input parameter (we tested 1 and 2 layers)
-"""
-
 class Transformer(nn.Module):
     def __init__(self, TEXT, LABEL, args):
-        super(LSTM, self).__init__()
+        super(Transformer, self).__init__()
         self.vocab_size = len(TEXT.vocab)
         self.label_size = len(LABEL.vocab)
         self.embed_dim = args['embed_size']
@@ -456,29 +333,53 @@ class Transformer(nn.Module):
         if not args['no_pretrained_vectors']:
             self.embed.weight = nn.Parameter(TEXT.vocab.vectors)
 
-        # biderectional LSTM layer
-        self.lstm = nn.LSTM(self.embed_dim, self.hidden_size, self.layers, batch_first=True, dropout=args['dropout'], bidirectional=True)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=self.embed_dim,
+            nhead=args['num_heads'], dropout=args['dropout'], dim_feedforward=self.hidden_size)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=self.layers)
 
-        self.fc1 = nn.Linear(2 * self.hidden_size, self.label_size)
+        self.fc1 = nn.Linear(self.embed_dim, self.label_size)
 
         self.dropout = nn.Dropout(args['dropout'])
 
     def forward(self, batch):
-        h = self.h0.expand((-1, batch.size(0), -1)).contiguous()
-        c = self.h0.expand((-1, batch.size(0), -1)).contiguous()
-
-        H, _ = self.lstm(self.embed(batch), (h, c))
-        a = F.relu(H)
-        a = a.transpose(1,2)
-        z = F.max_pool1d(a, a.size(2)).view(-1, 2*self.hidden_size)
-
+        H = self.transformer(self.embed(batch))
+        z = F.max_pool1d(H.transpose(1,2), H.size(1)).squeeze()
         d = self.dropout(z)
-
         y = self.fc1(d)
         return y
 
+class Ensemble(nn.Module):
+    def __init__(self, models, args):
+        super(Ensemble, self).__init__()
+        self.models = models
+        self.label_size = len(args['LABEL'].vocab)
+        self.ensemble_mode = args['ensemble']
+
+        for i in range(len(self.models)):
+            self.models[i].eval()
+
+    def forward(self, batch):
+        if self.ensemble_mode == 'average':
+            scores = 0
+            for model in self.models:
+                scores += model(batch)
+            scores /= len(self.models)
+            return scores
+        else:
+            results = torch.zeros(batch.shape[0], self.label_size)
+            predictions = []
+            for model in self.models:
+                predictions.append(utils.predict(model, batch))
+            for i in range(batch.shape[0]):
+                count = Counter()
+                for idx in range(len(self.models)):
+                    count[predictions[idx][i]]+=1
+                results[i][count.most_common(1)[0][0]] = 1
+            return results
+
+
+
 model_dict = {
-    # 'mnbc': MNBC,
     'cbow': CBOW,
     'cnn': CNN,
     'cnn2': CNN2,
