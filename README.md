@@ -1,8 +1,10 @@
-# text_classification
+# Text Classification
 
+Implements CBOW, CNN, LSTM, LSTM+Attention, LSTM+CNN, Ensembling for text classification.
+Includes logging, command line arguments, and evaluation code.
 
-TODO:
-- New training function for all models
-- Args class to get command line arguments
-- Update to the new version of Pytorch
-- Torchtext data iterator
+Note that building the vocabulary and iterators was done through the Torch DataLoaders included in TorchText.
+The embeddings were manually loaded from fastText although TorchText allows to directly load them.
+
+Usage:
+`python main.py -h`
